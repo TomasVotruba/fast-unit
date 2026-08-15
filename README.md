@@ -76,23 +76,28 @@ Run only the tests whose code actually changed:
 vendor/bin/fastunit -tia rules-tests tests
 ```
 
-How it works, per class:
+Static, **no coverage driver needed** -- works on any PHP 7.2+ (uses only the
+built-in tokenizer, not `pcov`/`xdebug`):
 
-1. A per-class PHPUnit coverage run records the **exact set of source files each
-   test executes** (needs the `pcov` or `xdebug` driver). That map, plus a
-   sha256 snapshot of every source and test file, is cached under
-   `.fastunit-cache/`.
-2. On the next run, a class is re-run only if its own file, a sibling fixture,
-   or one of its covered source files changed. Impacted classes run **with
-   coverage again**, so the map self-heals.
-3. Fail-open by design: a class with no map entry, or a changed source file that
-   no map knows about, runs everything. TIA never silently skips an unknown
-   dependency.
+1. A tokenizer-based scanner reads each `.php` file's declared and referenced
+   class names and builds a file dependency graph.
+2. For each test class, it takes the transitive closure from **every file in the
+   test's directory** -- so a rule wired only in `config/configured_rule.php` is
+   included -- and re-runs the class only if a file in that closure, or a fixture
+   in its directory, changed since the last run.
+3. Change detection is a sha256 snapshot cached under `.fastunit-cache/`. The
+   graph is rebuilt every run (fast: whole-repo scan is ~1s), so new files are
+   always accounted for -- no stale map.
 
 ```
 TIA: 1 changed files, 1 impacted, 10 skipped   # edited one rule
-TIA: 0 changed files, 0 impacted, 11 skipped   # nothing changed -> instant
+TIA: 0 changed files, 0 impacted, 688 skipped  # nothing changed -> ~1s
 ```
+
+Safe by construction: static analysis **over**-approximates (an imported but
+unused class still forms an edge), so TIA may run a few extra tests, but it never
+skips a real dependency. On the first run (empty cache), or any scan error,
+everything runs.
 
 Flags: `-src` (comma-separated source dirs, default `src,rules`), `-tia-cache`
 (cache dir, default `.fastunit-cache`).

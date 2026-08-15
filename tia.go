@@ -11,43 +11,30 @@ import (
 	"sync"
 )
 
-// Test Impact Analysis (TIA): run only the test classes whose covered source
-// files, own file, or sibling fixtures changed since the last run.
+// Test Impact Analysis (TIA): run only the test classes whose dependencies
+// changed since the last run.
 //
-// Model: coverage-based, exact. For each test class, a per-class PHPUnit
-// coverage run records the set of source files it executes. That map plus a
-// file-hash snapshot is cached under -tia-cache. On a later run, a class is
-// re-run only if one of its dependencies changed; impacted classes run WITH
-// coverage again, so the map self-heals. Fail-open: an unknown class (no map
-// entry) or a changed source file absent from every map runs everything.
+// Model: static, extension-free. A PHP helper (built-in tokenizer only, no
+// pcov/xdebug) reports each file's declared and referenced class FQCNs. From
+// that we build a file dependency graph, take the transitive closure from each
+// test's directory (Test.php plus its sibling config/Source, so a rule wired in
+// config/configured_rule.php counts), and re-run a class only if a file in that
+// closure -- or a fixture in its directory -- changed. A file-hash snapshot is
+// cached under -tia-cache. Fail-open: on the first run, or any error building
+// the graph, everything runs.
+//
+// Static over-approximates (an imported-but-unused class still forms an edge),
+// so TIA may run a few extra tests, but it never skips a real dependency.
 
 type tiaCache struct {
-	// Hashes maps a repo-relative file path to its sha256 at snapshot time.
+	// Hashes maps a file path to its sha256 at the last snapshot.
 	Hashes map[string]string `json:"hashes"`
-	// Coverage maps a test file path to the source files it executes.
-	Coverage map[string][]string `json:"coverage"`
 }
 
-// coverageExtractor is embedded and written to a temp file at run time; it turns
-// PHPUnit's serialized --coverage-php dump into a JSON array of covered files.
-const coverageExtractor = `<?php
-require getcwd() . '/vendor/autoload.php';
-$dump = require $argv[1];
-$processed = $dump['codeCoverage'];
-$files = [];
-foreach ($processed->lineCoverage() as $file => $lines) {
-    foreach ($lines as $tests) {
-        if (is_array($tests) && $tests !== []) {
-            $files[$file] = true;
-            break;
-        }
-    }
+type fileScan struct {
+	Declared []string `json:"declared"`
+	Refs     []string `json:"refs"`
 }
-echo json_encode(array_values(array_map(
-    static fn (string $f): string => $f,
-    array_keys($files)
-)));
-`
 
 func splitList(csv string) []string {
 	var out []string
@@ -60,22 +47,18 @@ func splitList(csv string) []string {
 	return out
 }
 
-func runTIA(classes []testClass, testDirs, srcDirs []string, cacheDir, php, phpunit string, workers int) int {
+func runTIA(classes []testClass, testDirs, srcDirs []string, cacheDir, php, phpunit string, workers int, tmpIsolate bool) int {
 	cache := loadCache(cacheDir)
+	firstRun := len(cache.Hashes) == 0
 
-	// current hashes of everything that can invalidate a test: all source files
-	// and everything under the test dirs (test classes, fixtures, config).
 	current := hashTree(append(append([]string{}, srcDirs...), testDirs...))
-
 	changed := diffHashes(cache.Hashes, current)
 
-	// a changed source file that no map knows about can affect unknown tests;
-	// be safe and run everything until the map learns it.
-	runAll := len(cache.Coverage) == 0 || changedUnknownSource(changed, cache.Coverage, srcDirs)
+	edges, allFiles, graphOK := buildGraph(append(append([]string{}, srcDirs...), testDirs...), php)
 
 	var impacted []testClass
 	for _, c := range classes {
-		if runAll || isImpacted(c.path, cache.Coverage, changed) {
+		if firstRun || !graphOK || isImpacted(c.path, edges, allFiles, changed) {
 			impacted = append(impacted, c)
 		}
 	}
@@ -84,175 +67,121 @@ func runTIA(classes []testClass, testDirs, srcDirs []string, cacheDir, php, phpu
 	fmt.Printf("TIA: %d changed files, %d impacted, %d skipped\n", len(changed), len(impacted), skipped)
 
 	if len(impacted) == 0 {
-		// still refresh the hash snapshot so deletions/renames settle.
 		cache.Hashes = current
 		saveCache(cacheDir, cache)
 		fmt.Println("OK (nothing to run)")
 		return 0
 	}
 
-	extractor := writeExtractor()
-	defer os.Remove(extractor)
-
-	failed, coverage := runWithCoverage(impacted, srcDirs, php, phpunit, extractor, workers)
-
-	// merge refreshed coverage entries and the new hash snapshot.
-	for testPath, files := range coverage {
-		cache.Coverage[testPath] = files
+	chunks := balance(impacted, workers)
+	totalWeight := 0
+	for _, c := range impacted {
+		totalWeight += c.weight
 	}
+
+	failed := run(chunks, php, phpunit, workers, tmpIsolate, totalWeight)
+
 	cache.Hashes = current
 	saveCache(cacheDir, cache)
 
 	if failed > 0 {
-		fmt.Printf("FAILED classes: %d\n", failed)
+		fmt.Printf("FAILED chunks: %d\n", failed)
 		return 1
 	}
 	fmt.Println("OK")
 	return 0
 }
 
-// isImpacted reports whether a test class must run: its own file, its sibling
-// fixtures/config (anything under its directory), or a covered source changed.
-func isImpacted(testPath string, coverage map[string][]string, changed map[string]bool) bool {
-	covered, known := coverage[testPath]
-	if !known {
-		return true // fail-open: never seen this class
-	}
-
+// isImpacted reports whether a test class must run: a fixture (or any file) in
+// its own directory changed, or a file in its dependency closure changed.
+func isImpacted(testPath string, edges map[string][]string, allFiles []string, changed map[string]bool) bool {
 	testDir := filepath.Dir(testPath)
-	for path := range changed {
-		if path == testPath || strings.HasPrefix(path, testDir+string(os.PathSeparator)) {
-			return true
-		}
-	}
-	for _, src := range covered {
-		if changed[src] {
-			return true
-		}
-	}
-	return false
-}
+	prefix := testDir + string(os.PathSeparator)
 
-// changedUnknownSource reports whether any changed source file is absent from
-// every coverage entry, meaning its impact cannot be scoped.
-func changedUnknownSource(changed map[string]bool, coverage map[string][]string, srcDirs []string) bool {
-	known := make(map[string]bool)
-	for _, files := range coverage {
-		for _, f := range files {
-			known[f] = true
+	// any change inside the test's own directory subtree (fixtures, config, Source).
+	for path := range changed {
+		if path == testPath || strings.HasPrefix(path, prefix) {
+			return true
 		}
 	}
-	for path := range changed {
-		if !underAny(path, srcDirs) {
+
+	// seed the closure from every .php file under the test's directory subtree,
+	// so a rule referenced only in config/configured_rule.php is reached.
+	var seed []string
+	for _, file := range allFiles {
+		if file == testPath || strings.HasPrefix(file, prefix) {
+			seed = append(seed, file)
+		}
+	}
+
+	// transitive closure over the dependency graph.
+	seen := make(map[string]bool)
+	queue := seed
+	for len(queue) > 0 {
+		file := queue[len(queue)-1]
+		queue = queue[:len(queue)-1]
+		if seen[file] {
 			continue
 		}
-		if !known[path] {
+		seen[file] = true
+		if changed[file] {
 			return true
 		}
+		queue = append(queue, edges[file]...)
 	}
 	return false
 }
 
-func underAny(path string, dirs []string) bool {
-	for _, dir := range dirs {
-		if path == dir || strings.HasPrefix(path, dir+string(os.PathSeparator)) {
-			return true
-		}
+// buildGraph runs the PHP scanner and returns file->dependency-file edges, the
+// list of all scanned .php files (for subtree seeding), and whether it worked.
+func buildGraph(dirs []string, php string) (map[string][]string, []string, bool) {
+	scanner := writeScanner()
+	if scanner == "" {
+		return nil, nil, false
 	}
-	return false
-}
+	defer os.Remove(scanner)
 
-// runWithCoverage runs each impacted class in its own PHPUnit process with
-// coverage, in parallel, and returns the failure count and refreshed map.
-func runWithCoverage(classes []testClass, srcDirs []string, php, phpunit, extractor string, workers int) (int, map[string][]string) {
-	sem := make(chan struct{}, workers)
-	var wg sync.WaitGroup
-	var mu sync.Mutex
-	failed := 0
-	coverage := make(map[string][]string)
-	done := 0
-
-	for _, c := range classes {
-		wg.Add(1)
-		go func(c testClass) {
-			defer wg.Done()
-			sem <- struct{}{}
-			defer func() { <-sem }()
-
-			tmp, err := os.MkdirTemp("", "fastunit-cov-")
-			if err != nil {
-				mu.Lock()
-				failed++
-				mu.Unlock()
-				return
-			}
-			defer os.RemoveAll(tmp)
-			covFile := filepath.Join(tmp, "cov.php")
-
-			// pcov auto-detects a single directory (often just "src"); force the
-			// project root so every source dir (e.g. "rules") is instrumented,
-			// and exclude vendor to keep collection fast. --coverage-filter still
-			// restricts what is recorded to the requested source dirs.
-			args := []string{
-				"-d", "pcov.enabled=1",
-				"-d", "pcov.directory=.",
-				"-d", `pcov.exclude=~/(vendor|tests|rules-tests)/~`,
-				phpunit,
-			}
-			for _, dir := range srcDirs {
-				args = append(args, "--coverage-filter", dir)
-			}
-			args = append(args, "--coverage-php", covFile, c.path)
-
-			cmd := exec.Command(php, args...)
-			cmd.Env = append(os.Environ(), "TMPDIR="+tmp, "TMP="+tmp, "TEMP="+tmp)
-			out, runErr := cmd.CombinedOutput()
-
-			var covered []string
-			if fileExists(covFile) {
-				covered = extractCoverage(php, extractor, covFile)
-			}
-
-			mu.Lock()
-			if runErr != nil {
-				failed++
-				fmt.Fprint(os.Stderr, "\r")
-				fmt.Printf("FAILED %s: %v\n%s\n", c.path, runErr, tail(string(out), 15))
-			} else if hasIssues(string(out)) {
-				fmt.Fprint(os.Stderr, "\r")
-				fmt.Printf("WARNINGS %s:\n%s\n", c.path, issueExcerpt(string(out)))
-			}
-			if covered != nil {
-				coverage[c.path] = covered
-			}
-			done++
-			fmt.Fprintf(os.Stderr, "\rprogress: %3d%% (%d/%d classes)   ", done*100/len(classes), done, len(classes))
-			mu.Unlock()
-		}(c)
-	}
-	wg.Wait()
-	fmt.Fprintln(os.Stderr)
-	return failed, coverage
-}
-
-func extractCoverage(php, extractor, covFile string) []string {
-	out, err := exec.Command(php, extractor, covFile).Output()
+	args := append([]string{scanner}, dirs...)
+	out, err := exec.Command(php, args...).Output()
 	if err != nil {
-		return nil
+		return nil, nil, false
 	}
-	var files []string
-	if json.Unmarshal(out, &files) != nil {
-		return nil
+
+	var scans map[string]fileScan
+	if json.Unmarshal(out, &scans) != nil {
+		return nil, nil, false
 	}
-	return files
+
+	// declared FQCN -> file
+	declaredToFile := make(map[string]string)
+	for file, scan := range scans {
+		for _, fqcn := range scan.Declared {
+			declaredToFile[fqcn] = file
+		}
+	}
+
+	edges := make(map[string][]string, len(scans))
+	allFiles := make([]string, 0, len(scans))
+	for file, scan := range scans {
+		allFiles = append(allFiles, file)
+
+		var deps []string
+		for _, ref := range scan.Refs {
+			if target, ok := declaredToFile[ref]; ok && target != file {
+				deps = append(deps, target)
+			}
+		}
+		edges[file] = deps
+	}
+	return edges, allFiles, true
 }
 
-func writeExtractor() string {
-	f, err := os.CreateTemp("", "fastunit-extract-*.php")
+func writeScanner() string {
+	f, err := os.CreateTemp("", "fastunit-depscan-*.php")
 	if err != nil {
 		return ""
 	}
-	_, _ = f.WriteString(coverageExtractor)
+	_, _ = f.WriteString(dependencyScanner)
 	_ = f.Close()
 	return f.Name()
 }
@@ -316,7 +245,7 @@ func diffHashes(old, current map[string]string) map[string]bool {
 }
 
 func loadCache(dir string) tiaCache {
-	cache := tiaCache{Hashes: map[string]string{}, Coverage: map[string][]string{}}
+	cache := tiaCache{Hashes: map[string]string{}}
 	data, err := os.ReadFile(filepath.Join(dir, "tia.json"))
 	if err != nil {
 		return cache
@@ -324,9 +253,6 @@ func loadCache(dir string) tiaCache {
 	_ = json.Unmarshal(data, &cache)
 	if cache.Hashes == nil {
 		cache.Hashes = map[string]string{}
-	}
-	if cache.Coverage == nil {
-		cache.Coverage = map[string][]string{}
 	}
 	return cache
 }
@@ -340,9 +266,4 @@ func saveCache(dir string, cache tiaCache) {
 		return
 	}
 	_ = os.WriteFile(filepath.Join(dir, "tia.json"), data, 0o644)
-}
-
-func fileExists(path string) bool {
-	info, err := os.Stat(path)
-	return err == nil && !info.IsDir()
 }

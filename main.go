@@ -57,7 +57,7 @@ func main() {
 	}
 
 	if *tia {
-		os.Exit(runTIA(classes, dirs, splitList(*srcDirs), *cacheDir, *php, *phpunit, *workers))
+		os.Exit(runTIA(classes, dirs, splitList(*srcDirs), *cacheDir, *php, *phpunit, *workers, *tmpIsolate))
 	}
 
 	chunks := balance(classes, *workers)
