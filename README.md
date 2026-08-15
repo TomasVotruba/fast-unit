@@ -68,6 +68,38 @@ class.
   generic PHPUnit suites.
 - `size` — file byte size. Cheap fallback.
 
+## Test impact analysis (`-tia`)
+
+Run only the tests whose code actually changed:
+
+```bash
+vendor/bin/fastunit -tia rules-tests tests
+```
+
+How it works, per class:
+
+1. A per-class PHPUnit coverage run records the **exact set of source files each
+   test executes** (needs the `pcov` or `xdebug` driver). That map, plus a
+   sha256 snapshot of every source and test file, is cached under
+   `.fastunit-cache/`.
+2. On the next run, a class is re-run only if its own file, a sibling fixture,
+   or one of its covered source files changed. Impacted classes run **with
+   coverage again**, so the map self-heals.
+3. Fail-open by design: a class with no map entry, or a changed source file that
+   no map knows about, runs everything. TIA never silently skips an unknown
+   dependency.
+
+```
+TIA: 1 changed files, 1 impacted, 10 skipped   # edited one rule
+TIA: 0 changed files, 0 impacted, 11 skipped   # nothing changed -> instant
+```
+
+Flags: `-src` (comma-separated source dirs, default `src,rules`), `-tia-cache`
+(cache dir, default `.fastunit-cache`).
+
+**Add `.fastunit-cache/` to your `.gitignore`** -- it is a local, machine-specific
+cache.
+
 ## Isolation
 
 With `-tmp-isolate` (default on), each worker gets its own `TMPDIR` so tools

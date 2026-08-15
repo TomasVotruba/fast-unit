@@ -40,6 +40,9 @@ func main() {
 	phpunit := flag.String("bin", "vendor/phpunit/phpunit/phpunit", "phpunit entry script")
 	weightMode := flag.String("weight", "fixtures", "class weighting: fixtures | methods | size")
 	tmpIsolate := flag.Bool("tmp-isolate", true, "give each worker its own TMPDIR (needed for Rector's file cache)")
+	tia := flag.Bool("tia", false, "test impact analysis: run only tests whose covered source (or own files) changed")
+	srcDirs := flag.String("src", "src,rules", "comma-separated source dirs, for coverage filter and change detection (with -tia)")
+	cacheDir := flag.String("tia-cache", ".fastunit-cache", "directory holding the -tia coverage map and file hashes")
 	flag.Parse()
 
 	dirs := flag.Args()
@@ -51,6 +54,10 @@ func main() {
 	if len(classes) == 0 {
 		fmt.Fprintln(os.Stderr, "no test classes found")
 		os.Exit(1)
+	}
+
+	if *tia {
+		os.Exit(runTIA(classes, dirs, splitList(*srcDirs), *cacheDir, *php, *phpunit, *workers))
 	}
 
 	chunks := balance(classes, *workers)
