@@ -55,14 +55,15 @@ func main() {
 
 	chunks := balance(classes, *workers)
 
-	start := time.Now()
-	failed := run(chunks, *php, *phpunit, *workers, *tmpIsolate)
-	elapsed := time.Since(start)
-
 	totalWeight := 0
 	for _, c := range classes {
 		totalWeight += c.weight
 	}
+
+	start := time.Now()
+	failed := run(chunks, *php, *phpunit, *workers, *tmpIsolate, totalWeight)
+	elapsed := time.Since(start)
+
 	fmt.Printf("\n%d classes, %d weight (%s), %d chunks, %d workers\n",
 		len(classes), totalWeight, *weightMode, len(chunks), *workers)
 	fmt.Printf("wall time: %.2fs\n", elapsed.Seconds())
@@ -173,11 +174,24 @@ func balance(classes []testClass, n int) [][]testClass {
 	return out
 }
 
-func run(chunks [][]testClass, php, phpunit string, workers int, tmpIsolate bool) int {
+func run(chunks [][]testClass, php, phpunit string, workers int, tmpIsolate bool, totalWeight int) int {
 	sem := make(chan struct{}, workers)
 	var wg sync.WaitGroup
 	var mu sync.Mutex
 	failed := 0
+	doneWeight := 0
+	doneChunks := 0
+
+	// progress ticks per finished chunk (weight approximates runtime); it cannot
+	// go finer, since each worker runs its whole chunk in one warm process.
+	report := func() {
+		pct := 100
+		if totalWeight > 0 {
+			pct = doneWeight * 100 / totalWeight
+		}
+		fmt.Fprintf(os.Stderr, "\rprogress: %3d%% (%d/%d chunks)   ",
+			pct, doneChunks, len(chunks))
+	}
 
 	for idx, chunk := range chunks {
 		wg.Add(1)
@@ -185,6 +199,11 @@ func run(chunks [][]testClass, php, phpunit string, workers int, tmpIsolate bool
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
+
+			chunkWeight := 0
+			for _, c := range chunk {
+				chunkWeight += c.weight
+			}
 
 			// invoke via `php <phpunit>` so it works uniformly on Windows,
 			// where vendor/bin/phpunit is not directly executable.
@@ -207,15 +226,22 @@ func run(chunks [][]testClass, php, phpunit string, workers int, tmpIsolate bool
 			}
 
 			out, err := cmd.CombinedOutput()
+
+			mu.Lock()
 			if err != nil {
-				mu.Lock()
 				failed++
+				// clear the progress line before the failure block.
+				fmt.Fprint(os.Stderr, "\r")
 				fmt.Printf("chunk FAILED (%d classes): %v\n%s\n", len(chunk), err, tail(string(out), 15))
-				mu.Unlock()
 			}
+			doneWeight += chunkWeight
+			doneChunks++
+			report()
+			mu.Unlock()
 		}(idx, chunk)
 	}
 	wg.Wait()
+	fmt.Fprintln(os.Stderr)
 	return failed
 }
 

@@ -8,13 +8,17 @@ declare(strict_types=1);
  * GitHub release (once, cached in the package), verifies its sha256, then execs
  * it with the forwarded arguments.
  *
+ * Kept PHP 7.2-compatible on purpose: the shim is the only code that runs in the
+ * consuming project, and the Go binary itself is language-version-agnostic, so
+ * fast-unit can accelerate suites on legacy PHP too.
+ *
  * Overrides:
  *   FASTUNIT_BINARY=/abs/path   use this binary, skip all download logic
  *   FASTUNIT_VERSION=vX.Y.Z      pin a specific release tag
  */
 
 const REPO = 'tomasvotruba/fast-unit';
-const VERSION = 'v0.1.0'; // bumped per release tag; matches the built binaries
+const VERSION = 'v0.1.1'; // bumped per release tag; matches the built binaries
 
 $args = array_slice($argv, 1);
 
@@ -26,24 +30,28 @@ if (is_string($override) && $override !== '') {
 
 // 2. resolve platform -> asset name.
 $asset = assetName();
-$version = getenv('FASTUNIT_VERSION') ?: VERSION;
+
+$version = getenv('FASTUNIT_VERSION');
+if (! is_string($version) || $version === '') {
+    $version = VERSION;
+}
 
 // 3. cache binary inside the package dir: .bin/<version>/<asset>.
 $cacheDir = __DIR__ . '/../.bin/' . $version;
 $binary = $cacheDir . '/' . $asset;
 
 if (! is_file($binary)) {
-    if (! is_dir($cacheDir) && ! @mkdir($cacheDir, 0o755, true) && ! is_dir($cacheDir)) {
+    if (! is_dir($cacheDir) && ! @mkdir($cacheDir, 0755, true) && ! is_dir($cacheDir)) {
         fwrite(STDERR, "fastunit: cannot create cache dir {$cacheDir}\n");
         exit(1);
     }
 
-    $base = sprintf('https://github.com/%s/releases/download/%s', REPO, $version);
+    $base = 'https://github.com/' . REPO . '/releases/download/' . $version;
     download($base . '/' . $asset, $binary);
     verifyChecksum($base . '/checksums.txt', $binary, $asset);
 
     if (PHP_OS_FAMILY !== 'Windows') {
-        @chmod($binary, 0o755);
+        @chmod($binary, 0755);
     }
 }
 
@@ -54,17 +62,23 @@ exit(runBinary($binary, $args));
  */
 function assetName(): string
 {
-    $os = match (PHP_OS_FAMILY) {
-        'Darwin' => 'darwin',
-        'Windows' => 'windows',
-        default => 'linux',
-    };
+    switch (PHP_OS_FAMILY) {
+        case 'Darwin':
+            $os = 'darwin';
+            break;
+        case 'Windows':
+            $os = 'windows';
+            break;
+        default:
+            $os = 'linux';
+    }
 
     $machine = strtolower(php_uname('m'));
-    $arch = match (true) {
-        str_contains($machine, 'arm64'), str_contains($machine, 'aarch64') => 'arm64',
-        default => 'amd64',
-    };
+    if (strpos($machine, 'arm64') !== false || strpos($machine, 'aarch64') !== false) {
+        $arch = 'arm64';
+    } else {
+        $arch = 'amd64';
+    }
 
     $suffix = $os === 'windows' ? '.exe' : '';
 
@@ -112,7 +126,10 @@ function verifyChecksum(string $checksumsUrl, string $binary, string $asset): vo
     }
 }
 
-function httpGet(string $url): ?string
+/**
+ * @return string|null
+ */
+function httpGet(string $url)
 {
     $context = stream_context_create([
         'http' => ['follow_location' => 1, 'timeout' => 60],
@@ -124,7 +141,7 @@ function httpGet(string $url): ?string
 }
 
 /**
- * @param list<string> $args
+ * @param string[] $args
  */
 function runBinary(string $binary, array $args): int
 {

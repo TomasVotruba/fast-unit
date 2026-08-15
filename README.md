@@ -4,6 +4,18 @@ Run a PHPUnit suite **~4x faster** by splitting test classes across parallel
 workers that each boot PHP **once** and run many classes in a single process.
 
 Ships as prebuilt Go binaries fetched on first run — **no Go toolchain needed**.
+Runs on **PHP 7.2+** (only the tiny downloader shim is PHP; the runner is a
+version-agnostic native binary), so it accelerates legacy suites too.
+
+While it runs it prints a live weight-based progress line:
+
+```
+progress:  73% (9/12 chunks)
+```
+
+Progress ticks per finished chunk (chunk weight approximates runtime). It cannot
+go finer, because each worker runs its whole chunk in one warm PHP process --
+that single boot is the speedup.
 
 ## Install
 
