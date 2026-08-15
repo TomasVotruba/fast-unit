@@ -1,0 +1,20 @@
+{
+    "name": "tomasvotruba/fast-unit",
+    "description": "Run a PHPUnit suite ~4x faster with a parallel, warm-process Go runner. Ships as prebuilt binaries; no Go toolchain required.",
+    "license": "MIT",
+    "type": "library",
+    "keywords": ["phpunit", "parallel", "tests", "performance"],
+    "authors": [
+        {
+            "name": "Tomas Votruba",
+            "email": "tomas.vot@gmail.com"
+        }
+    ],
+    "require": {
+        "php": ">=8.1"
+    },
+    "bin": ["bin/fastunit"],
+    "config": {
+        "sort-packages": true
+    }
+}

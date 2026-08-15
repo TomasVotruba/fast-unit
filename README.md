@@ -1,0 +1,71 @@
+# fast-unit
+
+Run a PHPUnit suite **~4x faster** by splitting test classes across parallel
+workers that each boot PHP **once** and run many classes in a single process.
+
+Ships as prebuilt Go binaries fetched on first run — **no Go toolchain needed**.
+
+## Install
+
+```bash
+composer require --dev tomasvotruba/fast-unit
+```
+
+## Usage
+
+```bash
+vendor/bin/fastunit -p 12                          # whole suite
+vendor/bin/fastunit -p 8 rules-tests/CodeQuality   # a subtree
+```
+
+On first run the shim downloads the matching binary for your OS/arch from the
+GitHub release, verifies its sha256, caches it, and execs it.
+
+### Flags
+
+| Flag | Default | Meaning |
+| --- | --- | --- |
+| `-p` | CPU count | parallel workers |
+| `-bin` | `vendor/phpunit/phpunit/phpunit` | phpunit entry script |
+| `-weight` | `fixtures` | class weighting: `fixtures` \| `methods` \| `size` |
+| `-tmp-isolate` | `true` | give each worker its own `TMPDIR` |
+| `-php` | `php` | php interpreter |
+
+Positional args are the directories to scan (default `rules-tests tests`).
+
+### Environment overrides
+
+| Var | Effect |
+| --- | --- |
+| `FASTUNIT_BINARY=/path` | use this binary, skip all download logic (CI prebuild / airgap) |
+| `FASTUNIT_VERSION=vX.Y.Z` | pin a specific release tag |
+
+## Why it is faster
+
+Bootstrap dominates a class's run, not the assertions. A tool that spawns a
+fresh process per class pays the container-build cost once per class. fast-unit
+splits classes into N chunks balanced by weight, and each worker runs its whole
+chunk in one warm process — so the container is built N times, not once per
+class.
+
+### Weighting modes
+
+- `fixtures` — count sibling `Fixture/*.php.inc` files. Best for Rector rule
+  tests, which iterate one assertion per fixture.
+- `methods` — count `function test*` and `#[Test]` occurrences. Good for
+  generic PHPUnit suites.
+- `size` — file byte size. Cheap fallback.
+
+## Isolation
+
+With `-tmp-isolate` (default on), each worker gets its own `TMPDIR` so tools
+that cache under `sys_get_temp_dir()` (e.g. Rector's `rector_cached_files`) do
+not race across parallel processes. Turn it off for suites that do not need it.
+
+> Note: sharing one PHP process across classes can surface latent global-state
+> leaks between test classes (static parameter providers, etc.). Reset such
+> state in `tearDownAfterClass()`.
+
+## License
+
+MIT
