@@ -226,13 +226,19 @@ func run(chunks [][]testClass, php, phpunit string, workers int, tmpIsolate bool
 			}
 
 			out, err := cmd.CombinedOutput()
+			outStr := string(out)
 
 			mu.Lock()
 			if err != nil {
 				failed++
 				// clear the progress line before the failure block.
 				fmt.Fprint(os.Stderr, "\r")
-				fmt.Printf("chunk FAILED (%d classes): %v\n%s\n", len(chunk), err, tail(string(out), 15))
+				fmt.Printf("chunk FAILED (%d classes): %v\n%s\n", len(chunk), err, tail(outStr, 15))
+			} else if hasIssues(outStr) {
+				// PHPUnit passed but reported warnings/deprecations/notices; the
+				// captured output would otherwise hide them on a green run.
+				fmt.Fprint(os.Stderr, "\r")
+				fmt.Printf("chunk WARNINGS (%d classes):\n%s\n", len(chunk), issueExcerpt(outStr))
 			}
 			doneWeight += chunkWeight
 			doneChunks++
@@ -243,6 +249,24 @@ func run(chunks [][]testClass, php, phpunit string, workers int, tmpIsolate bool
 	wg.Wait()
 	fmt.Fprintln(os.Stderr)
 	return failed
+}
+
+// hasIssues reports whether a passing PHPUnit run still printed warnings,
+// deprecations, notices, or risky tests. PHPUnit prints exactly this phrase in
+// that case ("OK, but there were issues!").
+func hasIssues(s string) bool {
+	return strings.Contains(s, "but there were issues")
+}
+
+// issueExcerpt returns the PHPUnit detail block ("There was/were ... warning")
+// so the specific warnings surface, not the whole passing-test noise.
+func issueExcerpt(s string) string {
+	for _, marker := range []string{"There was ", "There were "} {
+		if i := strings.Index(s, marker); i >= 0 {
+			return strings.TrimRight(s[i:], "\n")
+		}
+	}
+	return tail(s, 20)
 }
 
 func tail(s string, lines int) string {
