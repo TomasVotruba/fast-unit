@@ -200,6 +200,10 @@ func run(chunks [][]testClass, php, phpunit string, workers int, tmpIsolate bool
 			pct, doneChunks, len(chunks))
 	}
 
+	// show the bar at 0% right away; the first real tick only lands once a whole
+	// warm chunk finishes, which on a cold boot is several seconds of blank screen.
+	report()
+
 	for idx, chunk := range chunks {
 		wg.Add(1)
 		go func(idx int, chunk []testClass) {
