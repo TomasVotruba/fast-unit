@@ -24,8 +24,11 @@ for platform in "${platforms[@]}"; do
     read -r goos goarch ext <<< "$platform"
     asset="fastunit-${goos}-${goarch}${ext:-}"
     echo "building ${asset}"
+    # -buildvcs=false keeps the output reproducible: without it Go stamps the
+    # commit hash + dirty flag into the binary, so the CI drift guard would
+    # always fail.
     GOOS="$goos" GOARCH="$goarch" CGO_ENABLED=0 \
-        go build -trimpath -ldflags "-s -w" -o "${out}/${asset}" .
+        go build -trimpath -buildvcs=false -ldflags "-s -w" -o "${out}/${asset}" .
 done
 
 echo "done -> ${out}"

@@ -1,0 +1,27 @@
+name: Binaries up to date
+
+on:
+    pull_request:
+    push:
+        branches:
+            - main
+
+jobs:
+    rebuild:
+        runs-on: ubuntu-latest
+        steps:
+            - uses: actions/checkout@v4
+
+            - uses: actions/setup-go@v5
+              with:
+                  go-version-file: go.mod
+
+            - name: Rebuild committed binaries
+              run: ./build.sh
+
+            - name: Fail if bin/dist/ drifted from source
+              run: |
+                  if ! git diff --exit-code -- bin/dist; then
+                      echo "::error::bin/dist/ is stale - run ./build.sh and commit the result"
+                      exit 1
+                  fi
