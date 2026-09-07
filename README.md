@@ -3,9 +3,9 @@
 Run a PHPUnit suite **~4x faster** by splitting test classes across parallel
 workers that each boot PHP **once** and run many classes in a single process.
 
-Ships as prebuilt Go binaries fetched on first run — **no Go toolchain needed**.
-Runs on **PHP 7.2+** (only the tiny downloader shim is PHP; the runner is a
-version-agnostic native binary), so it accelerates legacy suites too.
+Ships prebuilt Go binaries committed under `bin/dist/` — **no download, no Go
+toolchain needed**. Runs on **PHP 7.2+** (only the tiny shim is PHP; the runner
+is a version-agnostic native binary), so it accelerates legacy suites too.
 
 While it runs it prints a live weight-based progress line:
 
@@ -30,8 +30,9 @@ vendor/bin/fastunit -p 12                          # whole suite
 vendor/bin/fastunit -p 8 rules-tests/CodeQuality   # a subtree
 ```
 
-On first run the shim downloads the matching binary for your OS/arch from the
-GitHub release, verifies its sha256, caches it, and execs it.
+The shim picks the matching binary for your OS/arch from `bin/dist/` and execs
+it directly. To rebuild the binaries after a change, run `./build.sh` (needs a
+Go toolchain) and commit the refreshed `bin/dist/`.
 
 ### Flags
 
@@ -49,8 +50,7 @@ Positional args are the directories to scan (default `rules-tests tests`).
 
 | Var | Effect |
 | --- | --- |
-| `FASTUNIT_BINARY=/path` | use this binary, skip all download logic (CI prebuild / airgap) |
-| `FASTUNIT_VERSION=vX.Y.Z` | pin a specific release tag |
+| `FASTUNIT_BINARY=/path` | use this binary, skip the bundled one (custom build / airgap) |
 
 ## Why it is faster
 

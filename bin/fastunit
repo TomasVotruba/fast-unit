@@ -4,21 +4,17 @@
 declare(strict_types=1);
 
 /**
- * Thin PHP shim that fetches the matching prebuilt `fastunit` Go binary from a
- * GitHub release (once, cached in the package), verifies its sha256, then execs
- * it with the forwarded arguments.
+ * Thin PHP shim that execs the matching prebuilt `fastunit` Go binary committed
+ * under bin/dist/. No network download, no toolchain - the binary ships in the
+ * package.
  *
  * Kept PHP 7.2-compatible on purpose: the shim is the only code that runs in the
  * consuming project, and the Go binary itself is language-version-agnostic, so
  * fast-unit can accelerate suites on legacy PHP too.
  *
  * Overrides:
- *   FASTUNIT_BINARY=/abs/path   use this binary, skip all download logic
- *   FASTUNIT_VERSION=vX.Y.Z      pin a specific release tag
+ *   FASTUNIT_BINARY=/abs/path   use this binary, skip the bundled one
  */
-
-const REPO = 'tomasvotruba/fast-unit';
-const VERSION = 'v0.1.4'; // bumped per release tag; matches the built binaries
 
 $args = array_slice($argv, 1);
 
@@ -28,31 +24,16 @@ if (is_string($override) && $override !== '') {
     exit(runBinary($override, $args));
 }
 
-// 2. resolve platform -> asset name.
-$asset = assetName();
-
-$version = getenv('FASTUNIT_VERSION');
-if (! is_string($version) || $version === '') {
-    $version = VERSION;
-}
-
-// 3. cache binary inside the package dir: .bin/<version>/<asset>.
-$cacheDir = __DIR__ . '/../.bin/' . $version;
-$binary = $cacheDir . '/' . $asset;
+// 2. resolve platform -> bundled binary under bin/dist/.
+$binary = __DIR__ . '/dist/' . assetName();
 
 if (! is_file($binary)) {
-    if (! is_dir($cacheDir) && ! @mkdir($cacheDir, 0755, true) && ! is_dir($cacheDir)) {
-        fwrite(STDERR, "fastunit: cannot create cache dir {$cacheDir}\n");
-        exit(1);
-    }
+    fwrite(STDERR, "fastunit: bundled binary not found: {$binary}\nrun ./build.sh to (re)generate it\n");
+    exit(1);
+}
 
-    $base = 'https://github.com/' . REPO . '/releases/download/' . $version;
-    download($base . '/' . $asset, $binary);
-    verifyChecksum($base . '/checksums.txt', $binary, $asset);
-
-    if (PHP_OS_FAMILY !== 'Windows') {
-        @chmod($binary, 0755);
-    }
+if (PHP_OS_FAMILY !== 'Windows') {
+    @chmod($binary, 0755);
 }
 
 exit(runBinary($binary, $args));
@@ -83,61 +64,6 @@ function assetName(): string
     $suffix = $os === 'windows' ? '.exe' : '';
 
     return sprintf('fastunit-%s-%s%s', $os, $arch, $suffix);
-}
-
-function download(string $url, string $dest): void
-{
-    $data = httpGet($url);
-    if ($data === null) {
-        fwrite(STDERR, "fastunit: download failed: {$url}\n");
-        exit(1);
-    }
-    file_put_contents($dest, $data);
-}
-
-function verifyChecksum(string $checksumsUrl, string $binary, string $asset): void
-{
-    $list = httpGet($checksumsUrl);
-    if ($list === null) {
-        fwrite(STDERR, "fastunit: cannot fetch checksums: {$checksumsUrl}\n");
-        exit(1);
-    }
-
-    $expected = null;
-    foreach (explode("\n", $list) as $line) {
-        // format: "<sha256>  <asset>"
-        $parts = preg_split('/\s+/', trim($line));
-        if ($parts !== false && count($parts) === 2 && $parts[1] === $asset) {
-            $expected = strtolower($parts[0]);
-            break;
-        }
-    }
-
-    if ($expected === null) {
-        fwrite(STDERR, "fastunit: no checksum entry for {$asset}\n");
-        exit(1);
-    }
-
-    $actual = hash_file('sha256', $binary);
-    if (! hash_equals($expected, $actual)) {
-        @unlink($binary);
-        fwrite(STDERR, "fastunit: checksum mismatch for {$asset}\n");
-        exit(1);
-    }
-}
-
-/**
- * @return string|null
- */
-function httpGet(string $url)
-{
-    $context = stream_context_create([
-        'http' => ['follow_location' => 1, 'timeout' => 60],
-        'ssl' => ['verify_peer' => true, 'verify_peer_name' => true],
-    ]);
-    $data = @file_get_contents($url, false, $context);
-
-    return $data === false ? null : $data;
 }
 
 /**
